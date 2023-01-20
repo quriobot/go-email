@@ -54,7 +54,6 @@ func parseMessageWithHeader(headers Header, bodyReader io.Reader) (*Message, err
 	var body []byte
 	var parts []*Message
 	var subMessage *Message
-
 	if contentType := headers.Get("Content-Type"); len(contentType) > 0 {
 		mediaType, mediaTypeParams, err = mime.ParseMediaType(contentType)
 		if err != nil {
@@ -93,15 +92,21 @@ func parseMessageWithHeader(headers Header, bodyReader io.Reader) (*Message, err
 	}, nil
 }
 
+// isEOFError returns true if the error is an EOF error.
+func isEOFError(err error) bool {
+	return err == io.EOF || err != nil && strings.HasSuffix(err.Error(), "EOF")
+}
+
 // readParts parses out the parts of a multipart body, including the preamble and epilogue.
 func readParts(bodyReader io.Reader, boundary string) ([]*Message, error) {
 
 	parts := make([]*Message, 0, 1)
 	multipartReader := multipart.NewReader(bodyReader, boundary)
 
-	for part, partErr := multipartReader.NextPart(); partErr != io.EOF; part, partErr = multipartReader.NextPart() {
-		if partErr != nil && partErr != io.EOF {
-			return []*Message{}, partErr
+	for part, partErr := multipartReader.NextPart(); !isEOFError(partErr); part, partErr = multipartReader.NextPart() {
+		if partErr != nil && !isEOFError(partErr) {
+			continue
+			// return []*Message{}, partErr
 		}
 		newEmailPart, msgErr := parseMessageWithHeader(Header(part.Header), part)
 		part.Close()
@@ -179,14 +184,23 @@ func (r *preambleReader) Read(p []byte) (int, error) {
 
 // contentReader ...
 func contentReader(headers Header, bodyReader io.Reader) *bufio.Reader {
-	if headers.Get("Content-Transfer-Encoding") == "quoted-printable" {
+	body, _ := io.ReadAll(bodyReader)
+	contentEncoding := strings.ToLower(headers.Get("Content-Transfer-Encoding"))
+	if contentEncoding == "quoted-printable" {
 		headers.Del("Content-Transfer-Encoding")
-		return bufioReader(quotedprintable.NewReader(bodyReader))
+		decoded, err := io.ReadAll(quotedprintable.NewReader(bytes.NewReader(body)))
+		if err == nil {
+			return bufioReader(bytes.NewReader(decoded))
+		}
 	}
-	if headers.Get("Content-Transfer-Encoding") == "base64" {
+	if contentEncoding == "base64" {
 		headers.Del("Content-Transfer-Encoding")
-		return bufioReader(base64.NewDecoder(base64.StdEncoding, bodyReader))
+		decoded, err := io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(body)))
+		if err == nil {
+			return bufioReader(bytes.NewReader(decoded))
+		}
 	}
+	bodyReader = bytes.NewReader(body)
 	return bufioReader(bodyReader)
 }
 
